@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>指尖飞行：环球冒险 (H5 原型 · iPhone 修正版)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b1020;
+    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",Arial;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    overscroll-behavior: none;
+  }
+  #ui { position: fixed; inset: 0; pointer-events: none; }
+  .hud { position: absolute; left: 12px; right: 12px; top: 12px; display:flex; gap:10px; align-items:center; pointer-events:none; }
+  .chip {
+    background: rgba(255,255,255,0.08);
+    backdrop-filter: blur(6px);
+    color:#e6f1ff; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; padding: 6px 10px; font-size: 13px; letter-spacing: .2px;
+    pointer-events:none; display:flex; align-items:center; gap:6px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  }
+  .chip strong{font-weight:700;color:#fff}
+  .bottom-bar{ position:absolute; left:12px; right:12px; bottom:12px; display:flex; justify-content:space-between; align-items:center; pointer-events:none; }
+  .btn{
+    pointer-events:auto; user-select:none;
+    background:#1a2140; color:#fff; border:1px solid rgba(255,255,255,.12);
+    border-radius: 12px; padding: 10px 14px; font-weight:600; font-size:14px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.35);
+    touch-action: manipulation;
+  }
+  .fuelbar { height: 8px; width: 160px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow:hidden; border:1px solid rgba(255,255,255,.12); }
+  .fuelbar > i { display:block; height:100%; width:50%; background: linear-gradient(90deg,#38ef7d,#11998e); }
+  .center-tip{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    text-align:center; color:#e6f1ff; letter-spacing:.2px; line-height:1.5;
+    background: rgba(8,12,26,.6); padding:16px 18px; border-radius:14px; border:1px solid rgba(255,255,255,.12);
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  .center-tip h1{margin:0 0 6px 0; font-size:20px; color:#fff}
+  .center-tip p{margin:0; font-size:14px}
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+  <div class="hud">
+    <div class="chip"><span>🗺️ 城市</span><strong id="city">东京</strong></div>
+    <div class="chip"><span>🏁 进度</span><strong id="progress">0 / 8</strong></div>
+    <div class="chip"><span>💰 金币</span><strong id="coins">0</strong></div>
+    <div class="chip"><span>✈️ 速度</span><strong id="speed">0</strong> km/h</div>
+    <div class="chip fuelbar"><i id="fuelFill"></i></div>
+  </div>
+  <div class="bottom-bar">
+    <button class="btn" id="pauseBtn">暂停</button>
+    <button class="btn" id="resumeBtn" style="display:none">继续</button>
+    <button class="btn" id="restartBtn">重开</button>
+  </div>
+  <div class="center-tip" id="startTip">
+    <h1>指尖飞行：环球冒险</h1>
+    <p>单指在屏幕上 <b>拖动</b> 控制方向，<b>按住</b> 加速，松开巡航。<br>
+    穿越光环得分、收金币、在机场掠过补油。<br><br>
+    👉 轻触屏幕任意位置开始</p>
+  </div>
+  <div class="center-tip" id="pauseTip" style="display:none"><h1>已暂停</h1><p>点“继续”或再次触摸画面</p></div>
+  <div class="center-tip" id="gameOverTip" style="display:none"><h1>Game Over</h1><p id="overText">燃料耗尽！</p><p>点“重开”或触摸画面重来</p></div>
+</div>
+
+<script>
+(() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  let DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+  // iOS: 防止双指缩放/系统手势
+  ['gesturestart','gesturechange','gestureend'].forEach(ev => {
+    document.addEventListener(ev, e => e.preventDefault(), { passive:false });
+  });
+
+  function resize() {
+    const w = Math.floor(window.innerWidth * DPR);
+    const h = Math.floor(window.innerHeight * DPR);
+    canvas.width = w;
+    canvas.height = h;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const rand = (a=1,b=0)=> Math.random()*(b-a)+a;
+
+  const state = {
+    running: false, paused: false, over: false,
+    coins: 0, speed: 300, baseSpeed: 300, maxSpeed: 650,
+    fuel: 1, fuelDrain: 0.00006, fuelDrainBoost: 0.00018,
+    boost: false, progress: 0,
+    cities: [
+      {name:"东京", code:"HND"},
+      {name:"上海", code:"PVG"},
+      {name:"曼谷", code:"BKK"},
+      {name:"迪拜", code:"DXB"},
+      {name:"开罗", code:"CAI"},
+      {name:"巴黎", code:"CDG"},
+      {name:"纽约", code:"JFK"},
+      {name:"悉尼", code:"SYD"},
+    ],
+    currentCityIdx: 0, worldX: 0,
+  };
+
+  const cityEl = document.getElementById('city');
+  const progressEl = document.getElementById('progress');
+  const coinsEl = document.getElementById('coins');
+  const speedEl = document.getElementById('speed');
+  const fuelFill = document.getElementById('fuelFill');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resumeBtn = document.getElementById('resumeBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const startTip = document.getElementById('startTip');
+  const pauseTip = document.getElementById('pauseTip');
+  const gameOverTip = document.getElementById('gameOverTip');
+  const overText = document.getElementById('overText');
+
+  function updateHUD(){
+    cityEl.textContent = state.cities[state.currentCityIdx].name;
+    progressEl.textContent = `${state.progress} / ${state.cities.length}`;
+    coinsEl.textContent = state.coins;
+    speedEl.textContent = Math.round(state.speed);
+    fuelFill.style.width = Math.max(0, Math.min(1, state.fuel))*100 + "%";
+    fuelFill.style.background = state.fuel > 0.3 ? 'linear-gradient(90deg,#38ef7d,#11998e)' : 'linear-gradient(90deg,#f7971e,#ffd200)';
+    if (state.fuel < 0.12) fuelFill.style.background = 'linear-gradient(90deg,#ff416c,#ff4b2b)';
+  }
+
+  const player = { x: canvas.width*0.25, y: canvas.height*0.5, vx:0, vy:0, size:20*DPR, alive:true };
+
+  const rings=[],coins=[],clouds=[],airports=[];
+
+  function resetEntities() {
+    rings.length=0; coins.length=0; clouds.length=0; airports.length=0;
+    for (let i=0;i<30;i++) spawnRing(canvas.width + i*200*DPR + rand(-40,40)*DPR);
+    for (let i=0;i<20;i++) spawnCoin(canvas.width + i*280*DPR + rand(-60,60)*DPR);
+    for (let i=0;i<25;i++) spawnCloud(canvas.width + i*220*DPR + rand(-60,60)*DPR);
+    spawnAirport(canvas.width + 2400*DPR);
+  }
+  function spawnRing(x){ rings.push({x, y: rand(80*DPR, canvas.height-120*DPR), r: 18*DPR, passed:false}); }
+  function spawnCoin(x){ coins.push({x, y: rand(60*DPR, canvas.height-140*DPR), r: 8*DPR, taken:false}); }
+  function spawnCloud(x){ clouds.push({x, y: rand(20*DPR, canvas.height-80*DPR), w: rand(60,140)*DPR, h: rand(24,60)*DPR, alpha: rand(0.08,0.18)}); }
+  function spawnAirport(x){ airports.push({x, y: canvas.height - 30*DPR, w: 220*DPR, h: 6*DPR, landed:false, name: state.cities[state.currentCityIdx].code}); }
+
+  // -------- Robust input (Pointer Events + Touch + Mouse fallback) --------
+  let lastPt=null, touching=false;
+  const add = (el, type, handler, opts)=> el.addEventListener(type, handler, Object.assign({passive:false}, opts||{}));
+
+  function startRun(){
+    if (!state.running && !state.over){
+      state.running = true;
+      startTip.style.display = 'none';
+    } else if (state.over){
+      restartGame();
+    } else if (state.paused){
+      togglePause(false);
+    }
+  }
+
+  // Pointer Events (modern iOS Safari 支持)
+  if (window.PointerEvent){
+    add(window, 'pointerdown', e=>{
+      if (e.pointerType === 'touch' || e.pointerType === 'pen' || e.pointerType === 'mouse'){
+        e.preventDefault();
+        touching = true;
+        lastPt = {x:e.clientX*DPR, y:e.clientY*DPR};
+        state.boost = true;
+        startRun();
+      }
+    });
+    add(window, 'pointermove', e=>{
+      if (!touching) return;
+      e.preventDefault();
+      const nx = e.clientX*DPR, ny = e.clientY*DPR;
+      if (lastPt){
+        const dx = nx - lastPt.x, dy = ny - lastPt.y;
+        player.vx += dx * 0.12; player.vy += dy * 0.12;
+        const maxV = 10*DPR;
+        player.vx = Math.max(-maxV, Math.min(maxV, player.vx));
+        player.vy = Math.max(-maxV, Math.min(maxV, player.vy));
+      }
+      lastPt = {x:nx, y:ny};
+    });
+    add(window, 'pointerup', e=>{ e.preventDefault(); touching=false; lastPt=null; state.boost=false; });
+    add(window, 'pointercancel', e=>{ e.preventDefault(); touching=false; lastPt=null; state.boost=false; });
+  }else{
+    // Touch fallback
+    add(window, 'touchstart', e=>{
+      const t = e.changedTouches[0]; touching=true; lastPt={x:t.clientX*DPR,y:t.clientY*DPR}; state.boost=true; startRun();
+    });
+    add(window, 'touchmove', e=>{
+      if (!touching) return; const t=e.changedTouches[0];
+      const nx=t.clientX*DPR, ny=t.clientY*DPR;
+      const dx=nx-(lastPt?lastPt.x:nx), dy=ny-(lastPt?lastPt.y:ny);
+      player.vx += dx * 0.12; player.vy += dy * 0.12;
+      const maxV=10*DPR; player.vx=Math.max(-maxV,Math.min(maxV,player.vx)); player.vy=Math.max(-maxV,Math.min(maxV,player.vy));
+      lastPt={x:nx,y:ny};
+    });
+    add(window, 'touchend', ()=>{ touching=false; lastPt=null; state.boost=false; });
+    add(window, 'touchcancel', ()=>{ touching=false; lastPt=null; state.boost=false; });
+    // Mouse fallback
+    add(window, 'mousedown', e=>{ touching=true; lastPt={x:e.clientX*DPR,y:e.clientY*DPR}; state.boost=true; startRun(); });
+    add(window, 'mousemove', e=>{
+      if (!touching) return; const nx=e.clientX*DPR, ny=e.clientY*DPR; const dx=nx-lastPt.x, dy=ny-lastPt.y;
+      player.vx += dx * 0.12; player.vy += dy * 0.12; const maxV=10*DPR;
+      player.vx=Math.max(-maxV,Math.min(maxV,player.vx)); player.vy=Math.max(-maxV,Math.min(maxV,player.vy));
+      lastPt={x:nx,y:ny};
+    });
+    add(window, 'mouseup', ()=>{ touching=false; lastPt=null; state.boost=false; });
+  }
+
+  // Buttons
+  const togglePause = (p)=>{
+    if (!state.running || state.over) return;
+    state.paused = p;
+    pauseBtn.style.display = p ? 'none':'inline-block';
+    resumeBtn.style.display = p ? 'inline-block':'none';
+    pauseTip.style.display = p ? 'block':'none';
+  };
+  pauseBtn.addEventListener('click', ()=> togglePause(true));
+  resumeBtn.addEventListener('click', ()=> togglePause(false));
+  restartBtn.addEventListener('click', ()=> restartGame());
+
+  function gameOver(reason="燃料耗尽！"){
+    state.over = true; state.running = false;
+    gameOverTip.style.display = 'block'; overText.textContent = reason;
+  }
+  function restartGame(){
+    state.running=false; state.paused=false; state.over=false;
+    state.coins=0; state.speed=state.baseSpeed=300; state.fuel=1; state.progress=0; state.currentCityIdx=0; state.worldX=0;
+    player.x=canvas.width*0.25; player.y=canvas.height*0.5; player.vx=0; player.vy=0; player.alive=true;
+    startTip.style.display='block'; pauseTip.style.display='none'; gameOverTip.style.display='none';
+    pauseBtn.style.display='inline-block'; resumeBtn.style.display='none';
+    resetEntities(); updateHUD();
+  }
+
+  function drawBackground(){
+    const g = ctx.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0,'#0b1020'); g.addColorStop(1,'#071326');
+    ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.globalAlpha = 0.25;
+    for(let i=0;i<40;i++){
+      const x = (i*1234.567 + state.worldX*0.2) % canvas.width;
+      const y = (i*89.123) % canvas.height;
+      ctx.fillStyle = '#cce0ff'; ctx.fillRect(x, y, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+  function roundedRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+  function drawCloud(c){ ctx.save(); ctx.globalAlpha=c.alpha; ctx.fillStyle='#dbe8ff'; roundedRect(c.x - state.worldX, c.y, c.w, c.h, 10*DPR); ctx.fill(); ctx.restore(); }
+  function drawRing(r){ const x=r.x - state.worldX; ctx.beginPath(); ctx.arc(x,r.y,r.r,0,Math.PI*2); ctx.lineWidth=3*DPR; ctx.strokeStyle=r.passed?'rgba(80,255,180,0.5)':'rgba(120,200,255,0.9)'; ctx.stroke(); ctx.beginPath(); ctx.arc(x,r.y,r.r+6*DPR,0,Math.PI*2); ctx.strokeStyle='rgba(120,200,255,0.15)'; ctx.lineWidth=6*DPR; ctx.stroke(); }
+  function drawCoin(cn,t){ const x=cn.x - state.worldX; const pulse=Math.sin(t*4 + cn.x*0.01)*0.2 + 0.8; const r=cn.r*pulse;
+    ctx.beginPath(); ctx.arc(x, cn.y, r, 0, Math.PI*2);
+    const grad = ctx.createRadialGradient(x, cn.y, r*0.2, x, cn.y, r);
+    grad.addColorStop(0, '#fff7c2'); grad.addColorStop(1, '#f6c343'); ctx.fillStyle=grad; ctx.fill();
+    ctx.lineWidth=2*DPR; ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.stroke();
+  }
+  function drawAirport(a){
+    const x=a.x - state.worldX; ctx.fillStyle='#384156'; ctx.fillRect(x- a.w/2, a.y- a.h/2, a.w, a.h);
+    ctx.fillStyle='#fff'; for (let i=-a.w/2; i<a.w/2; i+=24*DPR){ ctx.fillRect(x+i, a.y-1*DPR, 10*DPR, 2*DPR); }
+    ctx.save(); ctx.translate(x + a.w/2 + 18*DPR, a.y - 40*DPR);
+    ctx.fillStyle='#5b6b86'; roundedRect(-6*DPR, 0, 12*DPR, 40*DPR, 3*DPR); ctx.fill();
+    ctx.fillStyle='#9db3d8'; roundedRect(-14*DPR, -14*DPR, 28*DPR, 14*DPR, 4*DPR); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.font = `${12*DPR}px system-ui`; ctx.textAlign='center'; ctx.fillText(a.name, x, a.y - 8*DPR);
+  }
+  function drawPlane(){
+    const x=player.x, y=player.y, s=player.size; ctx.save(); ctx.translate(x,y);
+    const tilt = Math.atan2(player.vy, 30*DPR) * 0.4; ctx.rotate(tilt);
+    roundedRect(-s*1.2, -s*0.3, s*2.2, s*0.6, s*0.25); ctx.fillStyle='#e6f1ff'; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(s*0.4, -s*0.12, s*0.36, s*0.22, 0, 0, Math.PI*2); ctx.fillStyle='#8cc5ff'; ctx.fill();
+    ctx.fillStyle='#c8d8ff'; roundedRect(-s*0.2, -s*0.9, s*0.8, s*0.5, s*0.1); ctx.fill(); roundedRect(-s*0.2,  s*0.4, s*0.8, s*0.5, s*0.1); ctx.fill(); roundedRect(-s*1.1, -s*0.3, s*0.2, s*0.6, s*0.08); ctx.fill();
+    if (state.boost && Math.random() < 0.8){ const len = rand(10, 26)*DPR; const w = rand(3, 7)*DPR; const grad = ctx.createLinearGradient(-s*1.3, 0, -s*1.3-len, 0); grad.addColorStop(0, '#ffd633'); grad.addColorStop(1, '#ff5f6d'); ctx.fillStyle=grad;
+      roundedRect(-s*1.3-len, -w/2, len, w, w/2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  const dist2=(ax,ay,bx,by)=>{ const dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; };
+
+  let last = performance.now();
+  function tick(now){
+    requestAnimationFrame(tick);
+    const dt = Math.min(50, now - last); last = now;
+    drawBackground();
+    if (!state.running || state.paused || state.over){
+      drawPlane(); clouds.forEach(drawCloud); rings.forEach(drawRing); coins.forEach(c=>drawCoin(c, now/1000)); airports.forEach(drawAirport); return;
+    }
+    const targetSpeed = state.boost ? state.maxSpeed : state.baseSpeed;
+    state.speed += (targetSpeed - state.speed) * 0.08;
+    state.fuel -= (state.boost ? state.fuelDrainBoost : state.fuelDrain) * (dt/16.67);
+    if (state.fuel <= 0){ state.fuel = 0; gameOver("燃料耗尽！尝试在机场降落补给～"); }
+    const scroll = (state.speed/6) * DPR * (dt/16.67); state.worldX += scroll;
+    player.x += player.vx; player.y += player.vy; player.vx *= 0.90; player.vy *= 0.92;
+    const margin = 20*DPR;
+    if (player.y < margin){ player.y = margin; player.vy *= -0.3; }
+    if (player.y > canvas.height - margin){ player.y = canvas.height - margin; player.vy *= -0.3; }
+    if (player.x < margin){ player.x = margin; player.vx *= -0.3; }
+    if (player.x > canvas.width*0.7){ player.x = canvas.width*0.7; player.vx = Math.min(player.vx, 0); }
+
+    function recycle(list){ for (let i=list.length-1;i>=0;i--){ const ex=list[i].x - state.worldX; if (ex < -300*DPR) list.splice(i,1); } }
+    recycle(rings); recycle(coins); recycle(clouds); recycle(airports);
+    const dens = (list,len,spawnFn,step,jitter)=>{
+      if (list.length < len){ const lastX = Math.max(...list.map(o=>o.x).concat([state.worldX + canvas.width])); for (let n=0; n<3; n++){ spawnFn(lastX + step*DPR + rand(-jitter,jitter)*DPR + n*step*0.3*DPR); } }
+    };
+    dens(rings,20,spawnRing,260,60); dens(coins,20,spawnCoin,320,80); dens(clouds,25,spawnCloud,240,100);
+
+    if (airports.length < 1){ state.currentCityIdx = (state.currentCityIdx + 1) % state.cities.length; spawnAirport(state.worldX + canvas.width + 2400*DPR + rand(-200,200)*DPR); }
+
+    rings.forEach(r => { const rx=r.x - state.worldX; const d=dist2(player.x,player.y,rx,r.y); if (!r.passed && d < (r.r*0.8)*(r.r*0.8)){ r.passed=true; state.progress=Math.min(state.cities.length, state.progress+1); state.fuel=Math.min(1, state.fuel+0.04); }});
+    coins.forEach(cn => { const cx=cn.x - state.worldX; const d=dist2(player.x,player.y,cx,cn.y); if (!cn.taken && d < (player.size*0.9)*(player.size*0.9)){ cn.taken=true; state.coins+=1; }});
+    clouds.forEach(cl => { const cx=cl.x - state.worldX; if (player.x > cx- cl.w/2 && player.x < cx + cl.w/2 && player.y > cl.y- cl.h/2 && player.y < cl.y + cl.h/2){ state.speed -= 2; player.vx *= 0.95; player.vy *= 0.95; }});
+    airports.forEach(a => { const ax=a.x - state.worldX; const nearX=Math.abs(player.x-ax) < a.w*0.45; const nearY=Math.abs(player.y-a.y) < 18*DPR; const lowVy=Math.abs(player.vy) < 2.4*DPR;
+      if (!a.landed && nearX && nearY && lowVy){ a.landed=true; state.fuel=Math.min(1, state.fuel+0.6); state.baseSpeed += 10; }
+    });
+
+    clouds.forEach(drawCloud); rings.forEach(drawRing); coins.forEach(c=>{ if(!c.taken) drawCoin(c, now/1000); }); airports.forEach(drawAirport); drawPlane();
+    updateHUD();
+  }
+
+  function init(){
+    restartGame();
+    requestAnimationFrame(tick);
+    document.addEventListener('visibilitychange', ()=>{ if (document.hidden) togglePause(true); });
+  }
+  init();
+})();
+</script>
+</body>
+</html>
